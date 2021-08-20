@@ -23,6 +23,8 @@ class DiskImageProcessor:
         self.unhfs_list = ["osx", "hfs", "apple", "apple_hfs", "mfs", "hfs plus"]
         self.tsk_list = ["ntfs", "fat", "exfat", "ext", "iso9660", "hfs+", "ufs", "raw", "swap", "yaffs2"]
 
+        self.premis_events = []
+
         self.setup_dirs()
 
     def setup_dirs(self):
@@ -38,14 +40,22 @@ class DiskImageProcessor:
 
     def process_disk(self):
         status = ""
+        message = ""
         self.run_preliminary_tools()
         potential_video = self.check_for_video()
         if potential_video:
             status = "skipped"
-            return status
+            message = "Image contains VIDEO_TS or AUDIO_TS directories"
+            return status, message
         else:
-            self.characterize_and_extract_files()
-            self.run_brunnhilde()
+            status, message = self.characterize_and_extract_files()
+            if status == "skipped":
+                return status, message
+            else:
+                self.run_brunnhilde()
+                self.bag_items()
+                status = "success"
+                return status, message
 
     def run_preliminary_tools(self):
         self.isoinfo_txt = os.path.join(self.subdoc_dir, "isoinfo_list.txt")
@@ -67,13 +77,15 @@ class DiskImageProcessor:
         self.parse_disk_filesystems()
 
         if len(self.partition_info_list) <= 1:
-            self.handle_file_extraction(self.objects_dir, False)
+            status, message = self.handle_file_extraction(self.objects_dir, False)
         else:
             for partition_info in self.partition_info_list:
                 out_folder = os.path.join(self.objects_dir, f"partition_{partition_info['slot']}")
-                self.handle_file_extraction(out_folder, partition_info)
+                status, message = self.handle_file_extraction(out_folder, partition_info)
+        return status, message
 
     def parse_disk_filesystems(self):
+        print("Parsing disk filesystems")
         self.partition_info_list = []
         self.filesystems = []
         with open(self.disktype_txt, "r") as f:
@@ -122,11 +134,10 @@ class DiskImageProcessor:
         if len(filesystems) == 1:
             filesystem = filesystems[0]
         elif len(filesystems) == 3 and sorted(filesystems) == ["hfs plus", "iso9660", "udf"]:
-            # hybrid disk
+            # hybrid disk, use tsk
             filesystem = "iso9660"
         else:
-            # skip
-            pass
+            return "skipped", "Unable to identify filesystem"
 
         if filesystem in self.tsk_list:
             self.carve_files_tsk(out_folder, partition)
@@ -135,11 +146,14 @@ class DiskImageProcessor:
         elif filesystem in self.mount_and_copy_list:
             self.mount_and_copy_files(out_folder)
         else:
-            # do something here to log that the filesystem is unsupported
-            pass
+            return "skipped", "Filesystem not supported"
+
+        return "success", ""
 
     def carve_files_tsk(self, out_folder, partition):
         self.generate_dfxml_fiwalk()
+
+        print("Carving files using tsk_recover")
         if partition:
             tsk_cmd = f"tsk_recover -a -o {partition['start']} {self.image_path} {out_folder}"
         else:
@@ -148,6 +162,7 @@ class DiskImageProcessor:
         self.fix_dates(out_folder)
 
     def fix_dates(self, out_folder):
+        print("Fixing dates from DFXML")
         try:
             for (event, obj) in Objects.iterparse(self.dfxml_file):
                 # only work on FileObjects
@@ -193,10 +208,12 @@ class DiskImageProcessor:
                         exported_filepath, (dfxml_filedate, dfxml_filedate)
                     )
         except ValueError:
-            print(f"Could not rewrite modified dates for disk {image_path} due to Objects.py ValueError")
+            print(f"Could not rewrite modified dates for disk {self.image_path} due to Objects.py ValueError")
 
     def carve_files_unhfs(self, out_folder, partition):
         self.generate_dfxml_fiwalk()
+
+        print("Carving files using unhfs")
         if sys.platform.startswith("linux"):
             unhfs_path = "/usr/share/hfsexplorer/bin/unhfs"
         elif sys.platform.startswith("darwin"):
@@ -210,6 +227,7 @@ class DiskImageProcessor:
         subprocess.call(unhfs_cmd, shell=True)
 
     def mount_and_copy_files(self, out_folder):
+        print("Mounting image and copying files")
         if self.check_files(out_folder):
             print(f"Files already exist in {out_folder}")
             sys.exit()
@@ -224,11 +242,13 @@ class DiskImageProcessor:
         subprocess.call("sudo umount /mnt/diskid", shell=True)
 
     def generate_dfxml_fiwalk(self):
+        print("Generating DFXML using fiwalk")
         if not os.path.exists(self.dfxml_file):
             fiwalk_cmd = ["fiwalk", "-X", self.dfxml_file, self.image_path]
             subprocess.check_output(fiwalk_cmd)
 
     def generate_dfxml_walk(self):
+        print("Generating DFXL using walk_to_dfxml.py")
         this_dir = os.path.dirname(os.path.abspath(__file__))
         walk_to_dfxml_path = os.path.join(this_dir, "walk_to_dfxml.py")
         if not os.path.exists(self.dfxml_file):
@@ -247,10 +267,12 @@ class DiskImageProcessor:
         return False
 
     def run_brunnhilde(self):
+        print("Running brunnhilde")
         brunnhilde_cmd = f"brunnhilde.py -zb '{self.objects_dir}' '{self.brunnhilde_dir}'"
         subprocess.call(brunnhilde_cmd, shell=True)
 
     def bag_item(self):
+        print("Bagging item")
         bagit_cmd = f"bagit.py --md5 '{self.image_dir}'"
         subprocess.call(bagit_cmd, shell=True)
 
@@ -287,9 +309,9 @@ def main():
         image_path = os.path.join(diskimages_dir, source_image)
         disk_image_processor = DiskImageProcessor(source_dir, source_image, image_path)
         print(f"Processing {image_path}")
-        status = disk_image_processor.process_disk()
+        status, message = disk_image_processor.process_disk()
         if status == "skipped":
-            skipped.append(image_path)
+            skipped.append(f"{image_path} - {message}")
 
     if skipped:
         with open(os.path.join(logs_dir, "skipped.txt"), "w") as f:
