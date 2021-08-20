@@ -3,6 +3,7 @@
 # Additional inspiration from Mike Shallcross (https://github.com/IUBLibTech/bdpl_ingest)
 
 import argparse
+import csv
 import datetime
 import os
 import shutil
@@ -34,9 +35,28 @@ class DiskImageProcessor:
         self.metadata_dir = os.path.join(self.image_dir, "metadata")
         self.subdoc_dir = os.path.join(self.metadata_dir, "submissionDocumentation")
         self.dfxml_file = os.path.join(self.subdoc_dir, "dfxml.xml")
+        self.premis_csv = os.path.join(self.subdoc_dir, "premis.csv")
         self.brunnhilde_dir = os.path.join(self.subdoc_dir, "brunnhilde")
         for dirpath in [self.image_dir, self.objects_dir, self.metadata_dir, self.subdoc_dir]:
             os.makedirs(dirpath)
+
+    def record_premis(self, timestamp, event_type, event_outcome, event_detail, event_detail_note, agent_info):
+        premis_event = {}
+        premis_event["eventType"] = event_type
+        premis_event["eventOutcomeDetail"] = event_outcome
+        premis_event["timestamp"] = timestamp
+        premis_event["eventDetailInfo"] = event_detail
+        premis_event["eventDetailInfo_additional"] = event_detail_note
+        premis_event["linkingAgentIDvalue"] = agent_info
+
+        self.premis_events.append(premis_event)
+
+    def write_premis_csv(self):
+        headers = ["eventType", "eventOutcomeDetail", "timestamp", "eventDetailInfo", "eventDetailInfo_additional", "linkingAgentIDvalue"]
+        with open(self.premis_csv, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            writer.writeheader()
+            writer.writerows(self.premis_events)
 
     def process_disk(self):
         status = ""
@@ -53,18 +73,41 @@ class DiskImageProcessor:
                 return status, message
             else:
                 self.run_brunnhilde()
+                self.write_premis_csv()
                 self.bag_items()
                 status = "success"
                 return status, message
 
     def run_preliminary_tools(self):
         self.isoinfo_txt = os.path.join(self.subdoc_dir, "isoinfo_list.txt")
-        isoinfo_cmd = f"isoinfo -f -i '{self.image_path}' > '{self.isoinfo_txt}'"
-        subprocess.call(isoinfo_cmd, shell=True)
+        isoinfo_version_cmd = ["isoinfo", "-version"]
+        isoinfo_version = subprocess.run(isoinfo_version_cmd, capture_output=True).stdout.decode("utf-8").strip()
+        isoinfo_cmd = ["isoinfo", "-f", "-i", self.image_path]
+        timestamp = str(datetime.datetime.now())
+        with open(self.isoinfo_txt, "w") as f:
+            isoinfo_result = subprocess.run(isoinfo_cmd, stdout=f)
+        self.record_premis(
+            timestamp,
+            'forensic feature analysis',
+            isoinfo_result.returncode,
+            subprocess.list2cmdline(isoinfo_result.args),
+            "Generated directory listing from disk image",
+            isoinfo_version
+        )
 
         self.disktype_txt = os.path.join(self.subdoc_dir, "disktype.txt")
-        disktype_cmd = f"disktype '{self.image_path}' > '{self.disktype_txt}'"
-        subprocess.call(disktype_cmd, shell=True)
+        disktype_cmd = ["disktype", self.image_path]
+        timestamp = str(datetime.datetime.now())
+        with open(self.disktype_txt, "w") as f:
+            disktype_result = subprocess.run(disktype_cmd, stdout=f)
+        self.record_premis(
+            timestamp,
+            'forensic feature analysis',
+            disktype_result.returncode,
+            subprocess.list2cmdline(disktype_result.args),
+            "Determined fisk image file system information",
+            'disktype'
+        )
 
     def check_for_video(self):
         potential_video = False
@@ -101,9 +144,23 @@ class DiskImageProcessor:
             handle_partitions = False
 
         if handle_partitions:
+            mmls_version_cmd = ["mmls", "-V"]
+            mmls_version = subprocess.run(mmls_version_cmd, capture_output=True).stdout.decode("utf-8").strip()
             mmls_output = os.path.join(self.subdoc_dir, "mmls_output.txt")
-            mmls_command = f"mmls {self.image_path} > {mmls_output}"
-            subprocess.call(mmls_command, shell=True, text=True)
+            mmls_cmd = ["mmls", self.image_path]
+            timestamp = str(datetime.datetime.now())
+            with open(mmls_output, "w") as f:
+                mmls_result = subprocess.run(mmls_cmd, stdout=f)
+
+            self.record_premis(
+                timestamp,
+                'forensic feature analysis',
+                mmls_result.returncode,
+                subprocess.list2cmdline(mmls_result.args),
+                "Determined the layout of partitions",
+                mmls_version
+            )
+
             if os.stat(mmls_output).st_size > 0:
                 with open(mmls_output, "r") as f:
                     mmls_info = [m.split("\n") for m in f.read().splitlines()[5:]]
@@ -154,15 +211,28 @@ class DiskImageProcessor:
         self.generate_dfxml_fiwalk()
 
         print("Carving files using tsk_recover")
+        tsk_version_cmd = ["tsk_recover", "-V"]
+        tsk_version = subprocess.run(tsk_version_cmd, capture_output=True).stdout.decode("utf-8").strip()
         if partition:
-            tsk_cmd = f"tsk_recover -a -o {partition['start']} {self.image_path} {out_folder}"
+            tsk_cmd = ["tsk_recover", "-a", "-o", partition["start"], self.image_path, out_folder]
         else:
-            tsk_cmd = f"tsk_recover -a {self.image_path} {out_folder}"
-        subprocess.call(tsk_cmd, shell=True)
+            tsk_cmd = ["tsk_recover", "-a", self.image_path, out_folder]
+        timestamp = str(datetime.datetime.now())
+        tsk_result = subprocess.run(tsk_cmd)
+        self.record_premis(
+            timestamp,
+            'replication',
+            tsk_result.returncode,
+            subprocess.list2cmdline(tsk_result.args),
+            "Created a bit-wise identical copy of disk image",
+            f"tsk_recover: {tsk_version}"
+        )
+
         self.fix_dates(out_folder)
 
     def fix_dates(self, out_folder):
         print("Fixing dates from DFXML")
+        timestamp = str(datetime.datetime.now())
         try:
             for (event, obj) in Objects.iterparse(self.dfxml_file):
                 # only work on FileObjects
@@ -210,6 +280,15 @@ class DiskImageProcessor:
         except ValueError:
             print(f"Could not rewrite modified dates for disk {self.image_path} due to Objects.py ValueError")
 
+        self.record_premis(
+            timestamp,
+            'metadata modification',
+            0,
+            "DFXML and Python",
+            "Corrected file timestamps to match information extracted from disk image",
+            "Adapted from Disk Image Processor Version: 1.0.0 (Tessa Walsh)"
+            )
+
     def carve_files_unhfs(self, out_folder, partition):
         self.generate_dfxml_fiwalk()
 
@@ -219,12 +298,25 @@ class DiskImageProcessor:
         elif sys.platform.startswith("darwin"):
             unhfs_path = "/usr/local/share/hfsexplorer/bin/unhfs"
 
-        if partition:
-            unhfs_cmd = f'{unhfs_path} -partition {partition["slot"]} -resforks APPLEDOUBLE -o "{out_folder}" "{self.image_path}"'
-        else:
-            unhfs_cmd = f'{unhfs_path} -resforks APPLEDOUBLE -o "{out_folder}" "{self.image_path}"'
+        unhfs_ver_cmd = [unhfs_path]
+        unhfs_ver_result = subprocess.run(unhfs_ver_cmd, capture_output=True)
+        unhfs_ver = unhfs_ver_result.stderr.decode("utf-8").splitlines()[0]
 
-        subprocess.call(unhfs_cmd, shell=True)
+        if partition:
+            unhfs_cmd = [unhfs_path, "-partition", partition["slot"], "-resforks", "APPLEDOUBLE", "-o", out_folder, self.image_path]
+        else:
+            unhfs_cmd = [unhfs_path, "-resforks", "APPLEDOUBLE", "-o", out_folder, self.image_path]
+
+        timestamp = str(datetime.datetime.now())
+        unhfs_result = subprocess.run(unhfs_cmd)
+        self.record_premis(
+            timestamp,
+            'replication',
+            unhfs_result.returncode,
+            subprocess.list2cmd(unhfs_result.args),
+            "Created a bit-wise identical copy of disk image",
+            unhfs_ver
+        )
 
     def mount_and_copy_files(self, out_folder):
         print("Mounting image and copying files")
@@ -244,16 +336,37 @@ class DiskImageProcessor:
     def generate_dfxml_fiwalk(self):
         print("Generating DFXML using fiwalk")
         if not os.path.exists(self.dfxml_file):
+            timestamp = str(datetime.datetime.now())
+            fiwalk_ver_cmd = ["fiwalk", "-V"]
+            fiwalk_ver = subprocess.run(fiwalk_ver_cmd, capture_output=True).stdout.decode("utf-8").splitlines()[0]
             fiwalk_cmd = ["fiwalk", "-X", self.dfxml_file, self.image_path]
-            subprocess.check_output(fiwalk_cmd)
+            fiwalk_result = subprocess.run(fiwalk_cmd)
+            self.record_premis(
+                timestamp,
+                'message digest calculation',
+                fiwalk_result.returncode,
+                subprocess.list2cmdline(fiwalk_result.args),
+                "Extracted information about the structure and characteristics of content on disk image",
+                fiwalk_ver
+            )
 
     def generate_dfxml_walk(self):
         print("Generating DFXL using walk_to_dfxml.py")
         this_dir = os.path.dirname(os.path.abspath(__file__))
         walk_to_dfxml_path = os.path.join(this_dir, "walk_to_dfxml.py")
         if not os.path.exists(self.dfxml_file):
-            walk_to_dfxml_cmd = f"cd /mnt/diskid/ && python {walk_to_dfxml_path} > '{self.dfxml_file}'"
-            subprocess.call(walk_to_dfxml_cmd, shell=True)
+            timestamp = str(datetime.datetime.now())
+            walk_to_dfxml_cmd = ["python", walk_to_dfxml_path]
+            with open(self.dfxml_file, "w") as f:
+                walk_to_dfxml_result = subprocess.run(walk_to_dfxml_cmd, cwd="/mnt/diskid/", stdout=f)
+            self.record_premis(
+                timestamp,
+                'message digest calculation',
+                walk_to_dfxml_result.returncode,
+                subprocess.list2cmdline(walk_to_dfxml_result.args),
+                "Extracted information about the structure and characteristics of content on file system",
+                "walk_to_dfxml.py"
+            )
 
     def check_files(self, files_dir):
         if not os.path.exists(files_dir):
