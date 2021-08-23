@@ -6,6 +6,7 @@ import argparse
 import csv
 import datetime
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -74,7 +75,7 @@ class DiskImageProcessor:
             else:
                 self.run_brunnhilde()
                 self.write_premis_csv()
-                self.bag_items()
+                self.bag_item()
                 status = "success"
                 return status, message
 
@@ -224,7 +225,7 @@ class DiskImageProcessor:
             'replication',
             tsk_result.returncode,
             subprocess.list2cmdline(tsk_result.args),
-            "Created a bit-wise identical copy of disk image",
+            "Created a bit-wise identical copy of contents on disk image",
             f"tsk_recover: {tsk_version}"
         )
 
@@ -326,12 +327,24 @@ class DiskImageProcessor:
         else:
             shutil.rmtree(out_folder)
 
-        mount_cmd = f"sudo mount -o loop '{self.image_path}' /mnt/diskid/"
+        mount_location = "/mnt/diskid/"
+        mount_cmd = ["sudo", "mount", "-o", "loop", self.image_path, mount_location]
         self.generate_dfxml_walk()
 
-        subprocess.call(mount_cmd, shell=True)
+        subprocess.run(mount_cmd)
+        timestamp = str(datetime.datetime.now())
         shutil.copytree("/mnt/diskid", out_folder, symlinks=False, ignore=None)
-        subprocess.call("sudo umount /mnt/diskid", shell=True)
+        self.record_premis(
+            timestamp,
+            "replication",
+            0,
+            "shutil.copytree",
+            "Created a bit-wise identical copy of contents on disk image",
+            f"Python {platform.python_version()} shutil"
+        )
+
+        unmount_cmd = ["sudo", "umount", mount_location]
+        subprocess.run(unmount_cmd)
 
     def generate_dfxml_fiwalk(self):
         print("Generating DFXML using fiwalk")
@@ -381,13 +394,24 @@ class DiskImageProcessor:
 
     def run_brunnhilde(self):
         print("Running brunnhilde")
-        brunnhilde_cmd = f"brunnhilde.py -zb '{self.objects_dir}' '{self.brunnhilde_dir}'"
-        subprocess.call(brunnhilde_cmd, shell=True)
+        brunnhilde_ver_cmd = ["brunnhilde.py", "-V"]
+        brunnhilde_ver = subprocess.run(brunnhilde_ver_cmd, capture_output=True).stdout.decode("utf-8").strip()
+        brunnhilde_cmd = ["brunnhilde.py", "-zbn", self.objects_dir, self.brunnhilde_dir]
+        timestamp = str(datetime.datetime.now())
+        brunnhilde_result = subprocess.run(brunnhilde_cmd)
+        self.record_premis(
+            timestamp,
+            "metadata extraction",
+            brunnhilde_result.returncode,
+            subprocess.list2cmdline(brunnhilde_result.args),
+            "Determined file formats and scanned for potentially sensitive information",
+            brunnhilde_ver
+        )
 
     def bag_item(self):
         print("Bagging item")
-        bagit_cmd = f"bagit.py --md5 '{self.image_dir}'"
-        subprocess.call(bagit_cmd, shell=True)
+        bagit_cmd = ["bagit.py", "--md5", self.image_dir]
+        subprocess.run(bagit_cmd)
 
 
 def time_to_int(str_time):
