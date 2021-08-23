@@ -80,22 +80,6 @@ class DiskImageProcessor:
                 return status, message
 
     def run_preliminary_tools(self):
-        self.isoinfo_txt = os.path.join(self.subdoc_dir, "isoinfo_list.txt")
-        isoinfo_version_cmd = ["isoinfo", "-version"]
-        isoinfo_version = subprocess.run(isoinfo_version_cmd, capture_output=True).stdout.decode("utf-8").strip()
-        isoinfo_cmd = ["isoinfo", "-f", "-i", self.image_path]
-        timestamp = str(datetime.datetime.now())
-        with open(self.isoinfo_txt, "w") as f:
-            isoinfo_result = subprocess.run(isoinfo_cmd, stdout=f)
-        self.record_premis(
-            timestamp,
-            'forensic feature analysis',
-            isoinfo_result.returncode,
-            subprocess.list2cmdline(isoinfo_result.args),
-            "Generated directory listing from disk image",
-            isoinfo_version
-        )
-
         self.disktype_txt = os.path.join(self.subdoc_dir, "disktype.txt")
         disktype_cmd = ["disktype", self.image_path]
         timestamp = str(datetime.datetime.now())
