@@ -299,7 +299,7 @@ class DiskImageProcessor:
             timestamp,
             'replication',
             unhfs_result.returncode,
-            subprocess.list2cmd(unhfs_result.args),
+            subprocess.list2cmdline(unhfs_result.args),
             "Created a bit-wise identical copy of disk image",
             unhfs_ver
         )
@@ -313,7 +313,7 @@ class DiskImageProcessor:
             shutil.rmtree(out_folder)
 
         mount_location = "/mnt/diskid/"
-        mount_cmd = ["sudo", "mount", "-o", "loop", self.image_path, mount_location]
+        mount_cmd = ["sudo", "mount", "-o", "loop,ro", self.image_path, mount_location]
         self.generate_dfxml_walk()
 
         subprocess.run(mount_cmd)
