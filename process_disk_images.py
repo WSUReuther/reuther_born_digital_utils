@@ -63,21 +63,22 @@ class DiskImageProcessor:
         status = ""
         message = ""
         self.run_preliminary_tools()
-        potential_video = self.check_for_video()
-        if potential_video:
-            status = "skipped"
-            message = "Image contains VIDEO_TS or AUDIO_TS directories"
+        status, message = self.characterize_and_extract_files()
+        if status == "skipped":
+            self.write_premis_csv()
             return status, message
         else:
-            status, message = self.characterize_and_extract_files()
-            if status == "skipped":
-                return status, message
+            potential_video = self.check_for_video()
+            if potential_video:
+                status = "flagged"
+                message = "Image contains VIDEO_TS or AUDIO_TS directories"
             else:
                 self.run_brunnhilde()
-                self.write_premis_csv()
-                self.bag_item()
                 status = "success"
-                return status, message
+            self.write_premis_csv()
+            if not status == "flagged":
+                self.bag_item()
+            return status, message
 
     def run_preliminary_tools(self):
         self.disktype_txt = os.path.join(self.subdoc_dir, "disktype.txt")
@@ -96,9 +97,9 @@ class DiskImageProcessor:
 
     def check_for_video(self):
         potential_video = False
-        for line in open(self.isoinfo_txt, "r"):
-            if line.strip() in ["/AUDIO_TS", "/VIDEO_TS"]:
-                potential_video = True
+        objects_dir_contents = os.listdir(self.objects_dir)
+        if "AUDIO_TS" in objects_dir_contents or "VIDEO_TS" in objects_dir_contents:
+            potential_video = True
         return potential_video
 
     def characterize_and_extract_files(self):
@@ -426,6 +427,8 @@ def main():
 
     source_images = list_images(diskimages_dir)
     skipped = []
+    flagged = []
+    success = []
     for source_image in source_images:
         image_path = os.path.join(diskimages_dir, source_image)
         disk_image_processor = DiskImageProcessor(source_dir, source_image, image_path)
@@ -433,10 +436,27 @@ def main():
         status, message = disk_image_processor.process_disk()
         if status == "skipped":
             skipped.append(f"{image_path} - {message}")
+        elif status == "flagged":
+            flagged.append(f"{image_path} - {message}")
+        else:
+            success.append(image_path)
+
+    print("***** PROCESSING COMPLETE *****")
+    print(f"Total disks processed: {len(source_images)}")
+    print(f"Successes: {len(success)}")
+    print(f"Flagged: {len(flagged)}")
+    print(f"Skipped: {len(skipped)}")
+    print(f"Review logs in {logs_dir} for more information")
 
     if skipped:
         with open(os.path.join(logs_dir, "skipped.txt"), "w") as f:
             f.write("\n".join(skipped))
+    if flagged:
+        with open(os.path.join(logs_dir, "flagged.txt"), "w") as f:
+            f.write("\n".join(flagged))
+    if success:
+        with open(os.path.join(logs_dir, "success.txt"), "w") as f:
+            f.write("\n".join(success))
 
 
 if __name__ == "__main__":
