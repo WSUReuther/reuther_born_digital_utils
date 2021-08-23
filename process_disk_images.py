@@ -144,7 +144,7 @@ class DiskImageProcessor:
                 mmls_result.returncode,
                 subprocess.list2cmdline(mmls_result.args),
                 "Determined the layout of partitions",
-                mmls_version
+                f"mmls: {mmls_version}"
             )
 
             if os.stat(mmls_output).st_size > 0:
@@ -345,7 +345,7 @@ class DiskImageProcessor:
                 fiwalk_result.returncode,
                 subprocess.list2cmdline(fiwalk_result.args),
                 "Extracted information about the structure and characteristics of content on disk image",
-                fiwalk_ver
+                f"fiwalk: {fiwalk_ver}"
             )
 
     def generate_dfxml_walk(self):
