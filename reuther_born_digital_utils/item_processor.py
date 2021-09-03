@@ -1,8 +1,6 @@
-# Process legacy disk images (extract contents and run various reports on images and files)
-# Heavily inspired by/adopted from Tessa Walsh's diskimageprocessor (https://github.com/CCA-Public/diskimageprocessor)
+# Heavily inspired by/adoated from Tessa Walsh's diskimageprocessor (https://github.com/CCA-Public/diskimageprocessor)
 # Additional inspiration from Mike Shallcross (https://github.com/IUBLibTech/bdpl_ingest)
 
-import argparse
 import csv
 import datetime
 import os
@@ -12,33 +10,36 @@ import subprocess
 import sys
 import time
 
+sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 import Objects
 
 
-class DiskImageProcessor:
-    def __init__(self, source_dir, source_image, image_path):
-        self.source_dir = source_dir
-        self.source_image = source_image
-        self.image_path = image_path
-
-        self.mount_and_copy_list = ["udf"]
-        self.unhfs_list = ["osx", "hfs", "apple", "apple_hfs", "mfs", "hfs plus"]
-        self.tsk_list = ["ntfs", "fat", "exfat", "ext", "iso9660", "hfs+", "ufs", "raw", "swap", "yaffs2"]
-
-        self.premis_events = []
-
+class ItemProcessor:
+    def __init__(self, item_dir, keep_image=False):
+        self.item_dir = item_dir
+        self.keep_image = keep_image
+        self.status = None
+        self.message = None
+        self.check_dirs()
         self.setup_dirs()
-
-    def setup_dirs(self):
-        image_filename, image_ext = os.path.splitext(self.source_image)
-        self.image_dir = os.path.join(self.source_dir, image_filename)
-        self.objects_dir = os.path.join(self.image_dir, "objects")
-        self.metadata_dir = os.path.join(self.image_dir, "metadata")
-        self.subdoc_dir = os.path.join(self.metadata_dir, "submissionDocumentation")
         self.dfxml_file = os.path.join(self.subdoc_dir, "dfxml.xml")
         self.premis_csv = os.path.join(self.subdoc_dir, "premis.csv")
         self.brunnhilde_dir = os.path.join(self.subdoc_dir, "brunnhilde")
-        for dirpath in [self.image_dir, self.objects_dir, self.metadata_dir, self.subdoc_dir]:
+
+        self.premis_events = []
+
+    def check_dirs(self):
+        item_contents = sorted(os.listdir(self.item_dir))
+        if item_contents == ["metadata", "objects"]:
+            sys.exit(f"{self.item_dir} looks like it has already been repackaged.")
+        elif "bagit.txt" in item_contents:
+            sys.exit(f"{self.item_dir} looks like a bag.")
+
+    def setup_dirs(self):
+        self.objects_dir = os.path.join(self.item_dir, "objects")
+        self.metadata_dir = os.path.join(self.item_dir, "metadata")
+        self.subdoc_dir = os.path.join(self.metadata_dir, "submissionDocumentation")
+        for dirpath in [self.objects_dir, self.metadata_dir, self.subdoc_dir]:
             os.makedirs(dirpath)
 
     def record_premis(self, timestamp, event_type, event_outcome, event_detail, event_detail_note, agent_info):
@@ -59,26 +60,137 @@ class DiskImageProcessor:
             writer.writeheader()
             writer.writerows(self.premis_events)
 
-    def process_disk(self):
-        status = ""
-        message = ""
-        self.run_preliminary_tools()
-        status, message = self.characterize_and_extract_files()
-        if status == "skipped":
-            self.write_premis_csv()
-            return status, message
+    def remove_system_files(self):
+        self.filenames_to_remove = ["Thumbs.db", ".DS_Store", "Desktop DB", "Desktop DF"]
+        self.directories_to_remove = [".Trashes", ".Spotlight-V100", ".fseventsd"]
+
+        targets_to_remove = self.search_for_system_files()
+        deleted_targets = []
+        for filepath in targets_to_remove["files"]:
+            try:
+                os.remove(filepath)
+                deleted_targets.append(filepath)
+            except OSError:
+                print(f"Failed to delete file: {filepath}")
+        for dirpath in targets_to_remove["directories"]:
+            try:
+                shutil.rmtree(dirpath)
+                deleted_targets.append(dirpath)
+            except OSError:
+                print(f"Failed to delete directory: {dirpath}")
+        if deleted_targets:
+            log_file = os.path.join(self.subdoc_dir, "removed_system_files.txt")
+            with open(log_file, "w") as f:
+                f.write("\n".join(deleted_targets))
+            timestamp = str(datetime.datetime.now())
+            self.record_premis(
+                timestamp,
+                "deletion",
+                0,
+                "os.remove, shutil.rmtree",
+                "Deleted system files and folders",
+                f"Python {platform.python_version()}"
+            )
+
+    def search_for_system_files(self):
+        target_lists = {"files": [], "directories": []}
+
+        for root, dirnames, filenames in os.walk(self.objects_dir):
+            for dirname in dirnames:
+                if dirname in self.directories_to_remove:
+                    dirpath = os.path.join(root, dirname)
+                    target_lists["directories"].append(dirpath)
+
+            for filename in filenames:
+                if filename in self.filenames_to_remove:
+                    filepath = os.path.join(root, filename)
+                    target_lists["files"].append(filepath)
+
+        return target_lists
+
+    def run_brunnhilde(self):
+        print("Running brunnhilde")
+        brunnhilde_ver_cmd = ["brunnhilde.py", "-V"]
+        brunnhilde_ver = subprocess.run(brunnhilde_ver_cmd, capture_output=True).stdout.decode("utf-8").strip()
+        brunnhilde_cmd = ["brunnhilde.py", "-zbn", self.objects_dir, self.brunnhilde_dir]
+        timestamp = str(datetime.datetime.now())
+        brunnhilde_result = subprocess.run(brunnhilde_cmd)
+        self.record_premis(
+            timestamp,
+            "metadata extraction",
+            brunnhilde_result.returncode,
+            subprocess.list2cmdline(brunnhilde_result.args),
+            "Determined file formats and scanned for potentially sensitive information",
+            brunnhilde_ver
+        )
+
+        self.post_process_bulk_extractor_reports()
+
+    def post_process_bulk_extractor_reports(self):
+        be_dir = os.path.join(self.brunnhilde_dir, "bulk_extractor")
+        for filename in os.listdir(be_dir):
+            filepath = os.path.join(be_dir, filename)
+            if os.path.getsize(filepath) == 0:
+                os.remove(filepath)
+
+    def bag_item(self):
+        print("Bagging item")
+        bagit_cmd = ["bagit.py", "--quiet", "--md5", self.item_dir]
+        subprocess.run(bagit_cmd)
+
+    @staticmethod
+    def processor_for(transfer_type):
+        if transfer_type == "disk_images":
+            return DiskImageProcessor
+        elif transfer_type == "folders":
+            return FolderProcessor
         else:
+            sys.exit(f"Processor not implemented for {transfer_type}")
+
+
+class DiskImageProcessor(ItemProcessor):
+    def __init__(self, item_dir, keep_image=False):
+        self.find_disk_image(item_dir)
+        super().__init__(item_dir, keep_image=keep_image)
+
+        self.mount_and_copy_list = ["udf"]
+        self.unhfs_list = ["osx", "hfs", "apple", "apple_hfs", "mfs", "hfs plus"]
+        self.tsk_list = ["ntfs", "fat", "exfat", "ext", "iso9660", "hfs+", "ufs", "raw", "swap", "yaffs2"]
+
+    def find_disk_image(self, item_dir):
+        item_dir_files = os.listdir(item_dir)
+        disk_images = [
+                        filename for filename in item_dir_files
+                        if filename.endswith(".iso")
+                    ]
+        if len(disk_images) == 1:
+            self.image_filename = disk_images[0]
+            self.image_path = os.path.join(item_dir, self.image_filename)
+        else:
+            sys.exit(f"Error: Found {len(disk_images)} disk images in {item_dir}")
+
+    def process(self):
+        self.run_preliminary_tools()
+        self.characterize_and_extract_files()
+        if not self.status == "skipped":
             potential_video = self.check_for_video()
             if potential_video:
-                status = "flagged"
-                message = "Image contains VIDEO_TS or AUDIO_TS directories"
+                self.status = "flagged"
+                self.message = "Image contains VIDEO_TS or AUDIO_TS directories"
             else:
                 self.run_brunnhilde()
-                status = "success"
+                self.status = "success"
+
+        if self.status not in ["skipped", "flagged"]:
+            self.remove_system_files()
+            if self.keep_image:
+                self.repackage_files_and_image()
+            else:
+                os.remove(self.image_path)
             self.write_premis_csv()
-            if not status == "flagged":
-                self.bag_item()
-            return status, message
+            self.bag_item()
+        else:
+            self.write_premis_csv()
 
     def run_preliminary_tools(self):
         self.disktype_txt = os.path.join(self.subdoc_dir, "disktype.txt")
@@ -106,12 +218,11 @@ class DiskImageProcessor:
         self.parse_disk_filesystems()
 
         if len(self.partition_info_list) <= 1:
-            status, message = self.handle_file_extraction(self.objects_dir, False)
+            self.handle_file_extraction(self.objects_dir, False)
         else:
             for partition_info in self.partition_info_list:
                 out_folder = os.path.join(self.objects_dir, f"partition_{partition_info['slot']}")
-                status, message = self.handle_file_extraction(out_folder, partition_info)
-        return status, message
+                self.handle_file_extraction(out_folder, partition_info)
 
     def parse_disk_filesystems(self):
         print("Parsing disk filesystems")
@@ -180,7 +291,9 @@ class DiskImageProcessor:
             # hybrid disk, use tsk
             filesystem = "iso9660"
         else:
-            return "skipped", "Unable to identify filesystem"
+            self.status = "skipped"
+            self.message = "Unable to identify filesystem"
+            return
 
         if filesystem in self.tsk_list:
             self.carve_files_tsk(out_folder, partition)
@@ -189,9 +302,10 @@ class DiskImageProcessor:
         elif filesystem in self.mount_and_copy_list:
             self.mount_and_copy_files(out_folder)
         else:
-            return "skipped", "Filesystem not supported"
-
-        return "success", ""
+            self.status = "skipped"
+            self.message = "Filesystem not supported"
+            return
+        self.status = "success"
 
     def carve_files_tsk(self, out_folder, partition):
         self.generate_dfxml_fiwalk()
@@ -225,10 +339,14 @@ class DiskImageProcessor:
                 if not isinstance(obj, Objects.FileObject):
                     continue
 
-                # skip directories and links
+                # skip links
                 if obj.name_type:
                     if obj.name_type not in ["r", "d"]:
                         continue
+                
+                # skip current and parent directories
+                if obj.filename in [".", ".."]:
+                    continue
 
                 # record filename
                 dfxml_filename = obj.filename
@@ -313,7 +431,7 @@ class DiskImageProcessor:
             shutil.rmtree(out_folder)
 
         mount_location = "/mnt/diskid/"
-        mount_cmd = ["sudo", "mount", "-o", "loop,ro", self.image_path, mount_location]
+        mount_cmd = ["sudo", "mount", "-o", "loop,ro,noexec", self.image_path, mount_location]
         self.generate_dfxml_walk()
 
         subprocess.run(mount_cmd)
@@ -377,26 +495,55 @@ class DiskImageProcessor:
 
         return False
 
-    def run_brunnhilde(self):
-        print("Running brunnhilde")
-        brunnhilde_ver_cmd = ["brunnhilde.py", "-V"]
-        brunnhilde_ver = subprocess.run(brunnhilde_ver_cmd, capture_output=True).stdout.decode("utf-8").strip()
-        brunnhilde_cmd = ["brunnhilde.py", "-zbn", self.objects_dir, self.brunnhilde_dir]
-        timestamp = str(datetime.datetime.now())
-        brunnhilde_result = subprocess.run(brunnhilde_cmd)
-        self.record_premis(
-            timestamp,
-            "metadata extraction",
-            brunnhilde_result.returncode,
-            subprocess.list2cmdline(brunnhilde_result.args),
-            "Determined file formats and scanned for potentially sensitive information",
-            brunnhilde_ver
-        )
+    def repackage_files_and_image(self):
+        files_dir = os.path.join(self.objects_dir, "files")
+        contents = os.listdir(self.objects_dir)
+        os.makedirs(files_dir)
+        for content in contents:
+            if content not in ["objects", "metadata", "files", "disk-image"]:
+                content_path = os.path.join(self.objects_dir, content)
+                shutil.move(content_path, files_dir)
+        disk_image_dir = os.path.join(self.objects_dir, "disk-image")
+        os.makedirs(disk_image_dir)
+        shutil.move(self.image_path, disk_image_dir)
 
-    def bag_item(self):
-        print("Bagging item")
-        bagit_cmd = ["bagit.py", "--md5", self.image_dir]
-        subprocess.run(bagit_cmd)
+
+class FolderProcessor(ItemProcessor):
+    def __init__(self, item_dir, keep_image=False):
+        super().__init__(item_dir, keep_image=keep_image)
+
+    def process(self):
+        self.move_contents()
+        self.remove_system_files()
+        self.generate_dfxml()
+        self.run_brunnhilde()
+        self.write_premis_csv()
+        self.bag_item()
+        self.status = "success"
+
+    def move_contents(self):
+        contents = os.listdir(self.item_dir)
+        for content in contents:
+            if content not in ["objects", "metadata"]:
+                content_path = os.path.join(self.item_dir, content)
+                shutil.move(content_path, self.objects_dir)
+
+    def generate_dfxml(self):
+        this_dir = os.path.dirname(os.path.abspath(__file__))
+        walk_to_dfxml_path = os.path.join(this_dir, "walk_to_dfxml.py")
+        if not os.path.exists(self.dfxml_file):
+            timestamp = str(datetime.datetime.now())
+            walk_to_dfxml_cmd = ["python", walk_to_dfxml_path]
+            with open(self.dfxml_file, "w") as f:
+                walk_to_dfxml_result = subprocess.run(walk_to_dfxml_cmd, cwd=self.objects_dir, stdout=f)
+            self.record_premis(
+                timestamp,
+                'message digest calculation',
+                walk_to_dfxml_result.returncode,
+                subprocess.list2cmdline(walk_to_dfxml_result.args),
+                "Extracted information about the structure and characteristics of content on file system",
+                "walk_to_dfxml.py"
+            )
 
 
 def time_to_int(str_time):
@@ -407,57 +554,7 @@ def time_to_int(str_time):
     return dt
 
 
-def list_images(diskimages_dir):
-    diskimages_dir_files = os.listdir(diskimages_dir)
-    return [filename for filename in diskimages_dir_files if filename.lower().endswith(".iso")]
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("source", help="Source directory containing a diskimages directory with one or more disk images")
-
-    args = parser.parse_args()
-
-    source_dir = os.path.abspath(args.source)
-    diskimages_dir = os.path.join(source_dir, "diskimages")
-
-    logs_dir = os.path.join(source_dir, "logs")
-    if not os.path.exists(logs_dir):
-        os.makedirs(logs_dir)
-
-    source_images = list_images(diskimages_dir)
-    skipped = []
-    flagged = []
-    success = []
-    for source_image in source_images:
-        image_path = os.path.join(diskimages_dir, source_image)
-        disk_image_processor = DiskImageProcessor(source_dir, source_image, image_path)
-        print(f"Processing {image_path}")
-        status, message = disk_image_processor.process_disk()
-        if status == "skipped":
-            skipped.append(f"{image_path} - {message}")
-        elif status == "flagged":
-            flagged.append(f"{image_path} - {message}")
-        else:
-            success.append(image_path)
-
-    print("***** PROCESSING COMPLETE *****")
-    print(f"Total disks processed: {len(source_images)}")
-    print(f"Successes: {len(success)}")
-    print(f"Flagged: {len(flagged)}")
-    print(f"Skipped: {len(skipped)}")
-    print(f"Review logs in {logs_dir} for more information")
-
-    if skipped:
-        with open(os.path.join(logs_dir, "skipped.txt"), "w") as f:
-            f.write("\n".join(skipped))
-    if flagged:
-        with open(os.path.join(logs_dir, "flagged.txt"), "w") as f:
-            f.write("\n".join(flagged))
-    if success:
-        with open(os.path.join(logs_dir, "success.txt"), "w") as f:
-            f.write("\n".join(success))
-
-
-if __name__ == "__main__":
-    main()
+def process_item(item_dir, tranfser_type, keep_image=False):
+    processor = ItemProcessor.processor_for(tranfser_type)
+    processor = processor(item_dir, keep_image=keep_image)
+    processor.process()
