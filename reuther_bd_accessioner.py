@@ -1,7 +1,7 @@
 import argparse
 import sys
 
-from reuther_born_digital_utils.batch_processor import process_batch
+from reuther_born_digital_utils.batch_processor import process_batch, process_nimbie_batch
 from reuther_born_digital_utils.item_processor import process_item
 
 
@@ -33,24 +33,35 @@ def main():
                         help="Source directory is an individual item",
                         action="store_true"
                         )
+    parser.add_argument(
+                        "-n", "--nimbie",
+                        help="Source directory is a Nimbie batch",
+                        action="store_true"
+                        )
     args = parser.parse_args()
 
     source_dir = args.source
-    if args.disk_images and not args.file_transfer:
-        transfer_type = "disk_images"
-    elif args.file_transfer and not args.disk_images:
+    if args.nimbie:
+        source_type = "nimbie"
         transfer_type = "folders"
-    else:
-        sys.exit("Please specify either a disk image transfer [-d] or a file transfer transfer [-f]")
-
-    if args.batch and not args.item:
+    elif args.batch and not args.item:
         source_type = "batch"
     elif args.item and not args.batch:
         source_type = "item"
     else:
-        sys.exit("Please specify either a batch transfer [-b] or an individual item transfer [-i]")
+        sys.exit("Please specify a batch transfer [-b], an individual item transfer [-i], or a Nimbie transfer [-n]")
 
-    if source_type == "batch":
+    if source_type != "nimbie":
+        if args.disk_images and not args.file_transfer:
+            transfer_type = "disk_images"
+        elif args.file_transfer and not args.disk_images:
+            transfer_type = "folders"
+        else:
+            sys.exit("Please specify either a disk image transfer [-d] or a file transfer transfer [-f]")
+
+    if source_type == "nimbie":
+        process_nimbie_batch(source_dir, transfer_type, args.keep_image)
+    elif source_type == "batch":
         process_batch(source_dir, transfer_type, args.keep_image)
     else:
         process_item(source_dir, transfer_type, args.keep_image)

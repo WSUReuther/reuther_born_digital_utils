@@ -15,11 +15,12 @@ import Objects
 
 
 class ItemProcessor:
-    def __init__(self, item_dir, keep_image=False):
+    def __init__(self, item_dir, keep_image=False, nimbie_transfer=False):
         self.item_dir = item_dir
         self.keep_image = keep_image
         self.status = None
         self.message = None
+        self.nimbie_transfer = nimbie_transfer
         self.check_dirs()
         self.setup_dirs()
         self.dfxml_file = os.path.join(self.subdoc_dir, "dfxml.xml")
@@ -30,7 +31,7 @@ class ItemProcessor:
 
     def check_dirs(self):
         item_contents = sorted(os.listdir(self.item_dir))
-        if item_contents == ["metadata", "objects"]:
+        if item_contents == ["metadata", "objects"] and not self.nimbie_transfer:
             sys.exit(f"{self.item_dir} looks like it has already been repackaged.")
         elif "bagit.txt" in item_contents:
             sys.exit(f"{self.item_dir} looks like a bag.")
@@ -39,8 +40,13 @@ class ItemProcessor:
         self.objects_dir = os.path.join(self.item_dir, "objects")
         self.metadata_dir = os.path.join(self.item_dir, "metadata")
         self.subdoc_dir = os.path.join(self.metadata_dir, "submissionDocumentation")
+        self.nimbie_transfer_dir = os.path.join(self.subdoc_dir, "batch_transfer_logs")
         for dirpath in [self.objects_dir, self.metadata_dir, self.subdoc_dir]:
-            os.makedirs(dirpath)
+            if not os.path.exists(dirpath):
+                os.makedirs(dirpath)
+
+        if self.nimbie_transfer:
+            os.makedirs(self.nimbie_transfer_dir)
 
     def record_premis(self, timestamp, event_type, event_outcome, event_detail, event_detail_note, agent_info):
         premis_event = {}
@@ -343,7 +349,7 @@ class DiskImageProcessor(ItemProcessor):
                 if obj.name_type:
                     if obj.name_type not in ["r", "d"]:
                         continue
-                
+
                 # skip current and parent directories
                 if obj.filename in [".", ".."]:
                     continue
@@ -509,8 +515,8 @@ class DiskImageProcessor(ItemProcessor):
 
 
 class FolderProcessor(ItemProcessor):
-    def __init__(self, item_dir, keep_image=False):
-        super().__init__(item_dir, keep_image=keep_image)
+    def __init__(self, item_dir, keep_image=False, nimbie_transfer=False):
+        super().__init__(item_dir, keep_image=keep_image, nimbie_transfer=nimbie_transfer)
 
     def process(self):
         self.move_contents()
@@ -527,6 +533,13 @@ class FolderProcessor(ItemProcessor):
             if content not in ["objects", "metadata"]:
                 content_path = os.path.join(self.item_dir, content)
                 shutil.move(content_path, self.objects_dir)
+
+        if self.nimbie_transfer:
+            metadata_contents = os.listdir(self.metadata_dir)
+            for content in metadata_contents:
+                if content not in ["submissionDocumentation"]:
+                    content_path = os.path.join(self.metadata_dir, content)
+                    shutil.move(content_path, self.nimbie_transfer_dir)
 
     def generate_dfxml(self):
         this_dir = os.path.dirname(os.path.abspath(__file__))
