@@ -1,4 +1,4 @@
-# Heavily inspired by/adoated from Tessa Walsh's diskimageprocessor (https://github.com/CCA-Public/diskimageprocessor)
+# Heavily inspired by/adapted from Tessa Walsh's diskimageprocessor (https://github.com/CCA-Public/diskimageprocessor)
 # Additional inspiration from Mike Shallcross (https://github.com/IUBLibTech/bdpl_ingest)
 
 import csv
