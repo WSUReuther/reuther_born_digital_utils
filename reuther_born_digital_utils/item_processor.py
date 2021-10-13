@@ -31,10 +31,8 @@ class ItemProcessor:
 
     def check_dirs(self):
         item_contents = sorted(os.listdir(self.item_dir))
-        if item_contents == ["metadata", "objects"] and not self.nimbie_transfer:
-            sys.exit(f"{self.item_dir} looks like it has already been repackaged.")
-        elif "bagit.txt" in item_contents:
-            sys.exit(f"{self.item_dir} looks like a bag.")
+        if "bagit.txt" in item_contents:
+            sys.exit(f"{self.item_dir} looks like it's already been bagged.")
 
     def setup_dirs(self):
         self.objects_dir = os.path.join(self.item_dir, "objects")
